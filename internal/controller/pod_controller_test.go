@@ -17,16 +17,53 @@ limitations under the License.
 package controller
 
 import (
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
 	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
 )
 
 var _ = Describe("Pod Controller", func() {
 	Context("When reconciling a resource", func() {
 
-		It("should successfully reconcile the resource", func() {
+		It("should annotate a matching pod and preserve existing annotations", func() {
+			By("creating the target namespace")
 
-			// TODO(user): Add more specific assertions depending on your controller's reconciliation logic.
-			// Example: If you expect a certain status condition after reconciliation, verify it here.
+			namespace := &corev1.Namespace{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: targetNamespace,
+				},
+			}
+
+			Expect(k8sClient.Create(ctx, namespace)).To(Succeed())
+
+			By("creating a pod that matches the namespace and label")
+
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "matching-pod",
+					Namespace: targetNamespace,
+					Labels: map[string]string{
+						targetLabelKey: targetLabelValue,
+					},
+					Annotations: map[string]string{
+						"owner": "machani",
+					},
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Name:  "test",
+							Image: "nginx",
+						},
+					},
+				},
+			}
+
+			Expect(k8sClient.Create(ctx, pod)).To(Succeed())
+
+			// ...rest of test unchanged
 		})
 	})
 })
