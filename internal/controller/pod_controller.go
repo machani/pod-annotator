@@ -27,15 +27,22 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
+const (
+	targetNamespace  = "maas-t-tenant5"
+	targetLabelKey   = "prometheus"
+	targetLabelValue = "maas-t-tenant5-prometheus"
+
+	annotationKey   = "telemetry-compass.com/reconciled"
+	annotationValue = "true"
+)
+
 // PodReconciler reconciles a Pod object
 type PodReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
 }
 
-// +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=core,resources=pods/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=core,resources=pods/finalizers,verbs=update
+// +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;update
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -47,21 +54,62 @@ type PodReconciler struct {
 // For more details, check Reconcile and its Result here:
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.25.0/pkg/reconcile
 func (r *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	logger := logf.FromContext(ctx)
+	log := logf.FromContext(ctx)
 
 	pod := &corev1.Pod{}
 
 	err := r.Get(ctx, req.NamespacedName, pod)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
-			logger.Info("Pod not found, probably deleted")
+			log.Info("Pod not found, probably deleted")
 			return ctrl.Result{}, nil
 		}
 
 		return ctrl.Result{}, err
 	}
 
-	logger.Info("Pod found",
+	// Check namespace.
+	if pod.Namespace != targetNamespace {
+		log.Info("Skipping Pod: namespace does not match",
+			"name", pod.Name,
+			"namespace", pod.Namespace,
+		)
+		return ctrl.Result{}, nil
+	}
+
+	// Check label.
+	labelValue, exists := pod.Labels[targetLabelKey]
+	if !exists || labelValue != targetLabelValue {
+		log.Info("Skipping Pod: label does not match",
+			"name", pod.Name,
+			"namespace", pod.Namespace,
+		)
+		return ctrl.Result{}, nil
+	}
+
+	// Don't update the Pod if it already has the desired annotation.
+	if pod.Annotations != nil && pod.Annotations[annotationKey] == annotationValue {
+		log.Info("Pod already has annotation",
+			"name", pod.Name,
+			"namespace", pod.Namespace,
+		)
+		return ctrl.Result{}, nil
+	}
+
+	// A Pod might not have an annotations map yet.
+	if pod.Annotations == nil {
+		pod.Annotations = make(map[string]string)
+	}
+
+	// Modify our local Pod object.
+	pod.Annotations[annotationKey] = annotationValue
+
+	// Persist the change to Kubernetes.
+	if err := r.Update(ctx, pod); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	log.Info("Added annotation to Pod",
 		"name", pod.Name,
 		"namespace", pod.Namespace,
 	)
