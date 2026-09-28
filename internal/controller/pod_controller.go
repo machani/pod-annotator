@@ -20,11 +20,11 @@ import (
 	"context"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 )
 
 // PodReconciler reconciles a Pod object
@@ -47,21 +47,21 @@ type PodReconciler struct {
 // For more details, check Reconcile and its Result here:
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.25.0/pkg/reconcile
 func (r *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	log := log.FromContext(ctx)
+	logger := logf.FromContext(ctx)
 
 	pod := &corev1.Pod{}
 
 	err := r.Get(ctx, req.NamespacedName, pod)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
-			log.Info("Pod not found, probably deleted")
+			logger.Info("Pod not found, probably deleted")
 			return ctrl.Result{}, nil
 		}
 
 		return ctrl.Result{}, err
 	}
 
-	log.Info("Pod found",
+	logger.Info("Pod found",
 		"name", pod.Name,
 		"namespace", pod.Namespace,
 	)
