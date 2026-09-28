@@ -18,52 +18,102 @@ package controller
 
 import (
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	ctrl "sigs.k8s.io/controller-runtime"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 )
 
 var _ = Describe("Pod Controller", func() {
-	Context("When reconciling a resource", func() {
+	const otherNamespace = "pod-annotator-other"
+	var reconciler *PodReconciler
 
-		It("should annotate a matching pod and preserve existing annotations", func() {
-			By("creating the target namespace")
+	ensureNamespace := func(name string) {
+		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: name}}
+		err := k8sClient.Create(ctx, ns)
+		if err != nil && !apierrors.IsAlreadyExists(err) {
+			Expect(err).NotTo(HaveOccurred())
+		}
+	}
 
-			namespace := &corev1.Namespace{
-				ObjectMeta: metav1.ObjectMeta{
-					Name: targetNamespace,
-				},
-			}
+	newPod := func(name, namespace, labelValue string, annotations map[string]string) *corev1.Pod {
+		labels := map[string]string{}
+		if labelValue != "" {
+			labels[DefaultTargetLabelKey] = labelValue
+		}
+		return &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace, Labels: labels, Annotations: annotations},
+			Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "test", Image: "nginx"}}},
+		}
+	}
 
-			Expect(k8sClient.Create(ctx, namespace)).To(Succeed())
+	reconcile := func(pod *corev1.Pod) {
+		_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: pod.Name, Namespace: pod.Namespace}})
+		Expect(err).NotTo(HaveOccurred())
+	}
 
-			By("creating a pod that matches the namespace and label")
+	getPod := func(pod *corev1.Pod) *corev1.Pod {
+		current := &corev1.Pod{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: pod.Name, Namespace: pod.Namespace}, current)).To(Succeed())
+		return current
+	}
 
-			pod := &corev1.Pod{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "matching-pod",
-					Namespace: targetNamespace,
-					Labels: map[string]string{
-						targetLabelKey: targetLabelValue,
-					},
-					Annotations: map[string]string{
-						"owner": "machani",
-					},
-				},
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{
-						{
-							Name:  "test",
-							Image: "nginx",
-						},
-					},
-				},
-			}
+	BeforeEach(func() {
+		ensureNamespace(DefaultTargetNamespace)
+		ensureNamespace(otherNamespace)
+		reconciler = &PodReconciler{
+			Client: k8sClient, Scheme: k8sClient.Scheme(),
+			TargetNamespace: DefaultTargetNamespace, TargetLabelKey: DefaultTargetLabelKey,
+			TargetLabelValue: DefaultTargetLabelValue, AnnotationKey: DefaultAnnotationKey,
+			AnnotationValue: DefaultAnnotationValue,
+		}
+	})
 
-			Expect(k8sClient.Create(ctx, pod)).To(Succeed())
+	It("annotates a matching Pod and preserves unrelated annotations", func() {
+		pod := newPod("matching-pod", DefaultTargetNamespace, DefaultTargetLabelValue, map[string]string{"owner": "machani"})
+		Expect(k8sClient.Create(ctx, pod)).To(Succeed())
+		reconcile(pod)
+		current := getPod(pod)
+		Expect(current.Annotations).To(HaveKeyWithValue(DefaultAnnotationKey, DefaultAnnotationValue))
+		Expect(current.Annotations).To(HaveKeyWithValue("owner", "machani"))
+	})
 
-			// ...rest of test unchanged
-		})
+	It("does not annotate a Pod with a wrong label value", func() {
+		pod := newPod("wrong-label-pod", DefaultTargetNamespace, "something-else", nil)
+		Expect(k8sClient.Create(ctx, pod)).To(Succeed())
+		reconcile(pod)
+		Expect(getPod(pod).Annotations).NotTo(HaveKey(DefaultAnnotationKey))
+	})
+
+	It("does not annotate a Pod with the target label missing", func() {
+		pod := newPod("missing-label-pod", DefaultTargetNamespace, "", nil)
+		Expect(k8sClient.Create(ctx, pod)).To(Succeed())
+		reconcile(pod)
+		Expect(getPod(pod).Annotations).NotTo(HaveKey(DefaultAnnotationKey))
+	})
+
+	It("does not annotate a Pod in a different namespace", func() {
+		pod := newPod("wrong-namespace-pod", otherNamespace, DefaultTargetLabelValue, nil)
+		Expect(k8sClient.Create(ctx, pod)).To(Succeed())
+		reconcile(pod)
+		Expect(getPod(pod).Annotations).NotTo(HaveKey(DefaultAnnotationKey))
+	})
+
+	It("is idempotent when the desired annotation already exists", func() {
+		pod := newPod("already-annotated-pod", DefaultTargetNamespace, DefaultTargetLabelValue, map[string]string{DefaultAnnotationKey: DefaultAnnotationValue})
+		Expect(k8sClient.Create(ctx, pod)).To(Succeed())
+		before := getPod(pod).ResourceVersion
+		reconcile(pod)
+		current := getPod(pod)
+		Expect(current.Annotations).To(HaveKeyWithValue(DefaultAnnotationKey, DefaultAnnotationValue))
+		Expect(current.ResourceVersion).To(Equal(before))
+	})
+
+	It("returns successfully when the Pod no longer exists", func() {
+		_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: "deleted-pod", Namespace: DefaultTargetNamespace}})
+		Expect(err).NotTo(HaveOccurred())
 	})
 })

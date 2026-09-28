@@ -23,104 +23,91 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 )
 
 const (
-	targetNamespace  = "maas-t-tenant5"
-	targetLabelKey   = "prometheus"
-	targetLabelValue = "maas-t-tenant5-prometheus"
-
-	annotationKey   = "telemetry-compass.com/reconciled"
-	annotationValue = "true"
+	DefaultTargetNamespace  = "maas-t-tenant5"
+	DefaultTargetLabelKey   = "prometheus"
+	DefaultTargetLabelValue = "maas-t-tenant5-prometheus"
+	DefaultAnnotationKey    = "telemetry-compass.com/reconciled"
+	DefaultAnnotationValue  = "true"
 )
 
-// PodReconciler reconciles a Pod object
+// PodReconciler reconciles Pods that match the configured namespace and label.
 type PodReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+
+	TargetNamespace  string
+	TargetLabelKey   string
+	TargetLabelValue string
+	AnnotationKey    string
+	AnnotationValue  string
 }
 
-// +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;update
+// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;patch;update
 
-// Reconcile is part of the main kubernetes reconciliation loop which aims to
-// move the current state of the cluster closer to the desired state.
-// TODO(user): Modify the Reconcile function to compare the state specified by
-// the Pod object against the actual cluster state, and then
-// perform operations to make the cluster state reflect the state specified by
-// the user.
-//
-// For more details, check Reconcile and its Result here:
-// - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.25.0/pkg/reconcile
 func (r *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	log := logf.FromContext(ctx)
+	log := logf.FromContext(ctx).WithValues("pod", req.NamespacedName)
 
 	pod := &corev1.Pod{}
-
-	err := r.Get(ctx, req.NamespacedName, pod)
-	if err != nil {
+	if err := r.Get(ctx, req.NamespacedName, pod); err != nil {
 		if apierrors.IsNotFound(err) {
-			log.Info("Pod not found, probably deleted")
+			log.V(1).Info("Pod no longer exists")
 			return ctrl.Result{}, nil
 		}
-
 		return ctrl.Result{}, err
 	}
 
-	// Check namespace.
-	if pod.Namespace != targetNamespace {
-		log.Info("Skipping Pod: namespace does not match",
-			"name", pod.Name,
-			"namespace", pod.Namespace,
-		)
+	if pod.Namespace != r.TargetNamespace {
+		log.V(1).Info("Skipping Pod: namespace does not match")
 		return ctrl.Result{}, nil
 	}
 
-	// Check label.
-	labelValue, exists := pod.Labels[targetLabelKey]
-	if !exists || labelValue != targetLabelValue {
-		log.Info("Skipping Pod: label does not match",
-			"name", pod.Name,
-			"namespace", pod.Namespace,
-		)
+	if pod.Labels[r.TargetLabelKey] != r.TargetLabelValue {
+		log.V(1).Info("Skipping Pod: label does not match", "labelKey", r.TargetLabelKey)
 		return ctrl.Result{}, nil
 	}
 
-	// Don't update the Pod if it already has the desired annotation.
-	if pod.Annotations != nil && pod.Annotations[annotationKey] == annotationValue {
-		log.Info("Pod already has annotation",
-			"name", pod.Name,
-			"namespace", pod.Namespace,
-		)
+	if pod.Annotations != nil && pod.Annotations[r.AnnotationKey] == r.AnnotationValue {
+		log.V(1).Info("Pod already has desired annotation")
 		return ctrl.Result{}, nil
 	}
 
-	// A Pod might not have an annotations map yet.
+	before := pod.DeepCopy()
 	if pod.Annotations == nil {
 		pod.Annotations = make(map[string]string)
 	}
+	pod.Annotations[r.AnnotationKey] = r.AnnotationValue
 
-	// Modify our local Pod object.
-	pod.Annotations[annotationKey] = annotationValue
-
-	// Persist the change to Kubernetes.
-	if err := r.Update(ctx, pod); err != nil {
+	if err := r.Patch(ctx, pod, client.MergeFrom(before)); err != nil {
 		return ctrl.Result{}, err
 	}
 
-	log.Info("Added annotation to Pod",
-		"name", pod.Name,
-		"namespace", pod.Namespace,
-	)
-
+	log.Info("Annotated Pod", "annotationKey", r.AnnotationKey, "annotationValue", r.AnnotationValue)
 	return ctrl.Result{}, nil
 }
 
-// SetupWithManager sets up the controller with the Manager.
 func (r *PodReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	matchesTarget := predicate.Funcs{
+		CreateFunc:  func(e event.CreateEvent) bool { return r.matches(e.Object) },
+		UpdateFunc:  func(e event.UpdateEvent) bool { return r.matches(e.ObjectNew) },
+		DeleteFunc:  func(e event.DeleteEvent) bool { return r.matches(e.Object) },
+		GenericFunc: func(e event.GenericEvent) bool { return r.matches(e.Object) },
+	}
+
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&corev1.Pod{}).
+		For(&corev1.Pod{}, builder.WithPredicates(matchesTarget)).
 		Named("pod").
 		Complete(r)
+}
+
+func (r *PodReconciler) matches(obj client.Object) bool {
+	return obj.GetNamespace() == r.TargetNamespace &&
+		obj.GetLabels()[r.TargetLabelKey] == r.TargetLabelValue
 }

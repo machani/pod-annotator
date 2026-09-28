@@ -1,135 +1,199 @@
-# pod-annotator
-// TODO(user): Add simple overview of use/purpose
+# Pod Annotator
 
-## Description
-// TODO(user): An in-depth paragraph about your project and overview of use
+A small Kubebuilder/controller-runtime project that watches Kubernetes Pods and adds an annotation when a Pod matches a configured namespace and label.
 
-## Getting Started
+This project intentionally **does not define a CRD**. It reconciles the built-in Kubernetes `Pod` resource and is intended as a focused example for learning controller-runtime fundamentals.
 
-### Prerequisites
-- go version v1.24.6+
-- docker version 17.03+.
-- kubectl version v1.11.3+.
-- Access to a Kubernetes v1.11.3+ cluster.
+## Behavior
 
-### To Deploy on the cluster
-**Build and push your image to the location specified by `IMG`:**
+By default a Pod is selected when:
 
-```sh
-make docker-build docker-push IMG=<some-registry>/pod-annotator:tag
+- namespace: `maas-t-tenant5`
+- label: `prometheus=maas-t-tenant5-prometheus`
+
+The controller then ensures this annotation exists:
+
+```yaml
+telemetry-compass.com/reconciled: "true"
 ```
 
-**NOTE:** This image ought to be published in the personal registry you specified.
-And it is required to have access to pull the image from the working environment.
-Make sure you have the proper permission to the registry if the above commands don’t work.
+Existing labels and annotations are preserved. Reconciliation is idempotent: a Pod that already has the desired annotation is not modified again.
 
-**Install the CRDs into the cluster:**
-
-```sh
-make install
+```text
+Pod event
+   |
+   v
+namespace matches? -- no --> ignore
+   |
+  yes
+   v
+label matches? ----- no --> ignore
+   |
+  yes
+   v
+annotation already correct? -- yes --> no-op
+   |
+  no
+   v
+patch Pod annotation
 ```
 
-**Deploy the Manager to the cluster with the image specified by `IMG`:**
+## Prerequisites
 
-```sh
-make deploy IMG=<some-registry>/pod-annotator:tag
+- Go version specified in `go.mod`
+- Docker or another compatible container builder
+- `kubectl`
+- access to a Kubernetes cluster
+- GNU Make
+
+Kubebuilder helper binaries used by the Makefile are downloaded into `bin/` as needed.
+
+## Run locally
+
+Use your current kubeconfig and run the manager outside the cluster:
+
+```bash
+make run
 ```
 
-> **NOTE**: If you encounter RBAC errors, you may need to grant yourself cluster-admin
-privileges or be logged in as admin.
+The matching behavior can be changed without rebuilding:
 
-**Create instances of your solution**
-You can apply the samples (examples) from the config/sample:
-
-```sh
-kubectl apply -k config/samples/
+```bash
+go run ./cmd/main.go \
+  --target-namespace=maas-t-tenant5 \
+  --target-label-key=prometheus \
+  --target-label-value=maas-t-tenant5-prometheus \
+  --annotation-key=telemetry-compass.com/reconciled \
+  --annotation-value=true
 ```
 
->**NOTE**: Ensure that the samples has default values to test it out.
+## Test
 
-### To Uninstall
-**Delete the instances (CRs) from the cluster:**
+Run formatting, vetting and envtest-based controller tests:
 
-```sh
-kubectl delete -k config/samples/
+```bash
+make test
 ```
 
-**Delete the APIs(CRDs) from the cluster:**
+The controller tests cover matching Pods, wrong/missing labels, wrong namespaces, preservation of unrelated annotations, idempotency and deleted Pods.
 
-```sh
-make uninstall
+Run the Kind-based end-to-end suite with:
+
+```bash
+make test-e2e
 ```
 
-**UnDeploy the controller from the cluster:**
+## Try it manually
 
-```sh
+Create the target namespace if needed:
+
+```bash
+kubectl create namespace maas-t-tenant5
+```
+
+Create a matching Pod:
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: annotated-demo
+  namespace: maas-t-tenant5
+  labels:
+    prometheus: maas-t-tenant5-prometheus
+spec:
+  containers:
+    - name: pause
+      image: registry.k8s.io/pause:3.10
+```
+
+Then verify the annotation:
+
+```bash
+kubectl get pod annotated-demo -n maas-t-tenant5 \
+  -o jsonpath='{.metadata.annotations.telemetry-compass\.com/reconciled}{"\n"}'
+```
+
+Expected output:
+
+```text
+true
+```
+
+## Build and deploy
+
+Build and push an image to a registry accessible by your cluster:
+
+```bash
+make docker-build docker-push IMG=ghcr.io/machani/pod-annotator:v0.1.0
+```
+
+Deploy it:
+
+```bash
+make deploy IMG=ghcr.io/machani/pod-annotator:v0.1.0
+```
+
+Do not deploy the default `controller:latest` image unless that image is deliberately available to the cluster. Otherwise Kubernetes may try to pull `docker.io/library/controller:latest`.
+
+Check the manager:
+
+```bash
+kubectl get pods -n pod-annotator-system
+kubectl logs -n pod-annotator-system deployment/pod-annotator-controller-manager
+```
+
+Remove the deployment:
+
+```bash
 make undeploy
 ```
 
-## Project Distribution
+## Runtime configuration
 
-Following the options to release and provide this solution to the users.
+The manager supports these controller-specific flags:
 
-### By providing a bundle with all YAML files
+| Flag | Default |
+| --- | --- |
+| `--target-namespace` | `maas-t-tenant5` |
+| `--target-label-key` | `prometheus` |
+| `--target-label-value` | `maas-t-tenant5-prometheus` |
+| `--annotation-key` | `telemetry-compass.com/reconciled` |
+| `--annotation-value` | `true` |
 
-1. Build the installer for the image built and published in the registry:
+The deployment defaults are in `config/manager/manager.yaml`.
 
-```sh
-make build-installer IMG=<some-registry>/pod-annotator:tag
+## RBAC
+
+The controller only needs to read Pods and patch/update their metadata. RBAC is generated from the marker in `internal/controller/pod_controller.go`:
+
+```go
+// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;patch;update
 ```
 
-**NOTE:** The makefile target mentioned above generates an 'install.yaml'
-file in the dist directory. This file contains all the resources built
-with Kustomize, which are necessary to install this project without its
-dependencies.
+Regenerate manifests after changing RBAC markers:
 
-2. Using the installer
-
-Users can just run 'kubectl apply -f <URL for YAML BUNDLE>' to install
-the project, i.e.:
-
-```sh
-kubectl apply -f https://raw.githubusercontent.com/<org>/pod-annotator/<tag or branch>/dist/install.yaml
+```bash
+make manifests
 ```
 
-### By providing a Helm Chart
+## CI and image publishing
 
-1. Build the chart using the optional helm plugin
+GitHub Actions run linting, envtest tests and E2E tests. `build-image.yml` publishes tagged releases to GitHub Container Registry (GHCR), using the Git tag as the image tag.
 
-```sh
-kubebuilder edit --plugins=helm/v2-alpha
+For example, pushing Git tag `v0.1.0` publishes:
+
+```text
+ghcr.io/machani/pod-annotator:v0.1.0
 ```
 
-2. See that a chart was generated under 'dist/chart', and users
-can obtain this solution from there.
+## Project structure
 
-**NOTE:** If you change the project, you need to update the Helm Chart
-using the same command above to sync the latest changes. Furthermore,
-if you create webhooks, you need to use the above command with
-the '--force' flag and manually ensure that any custom configuration
-previously added to 'dist/chart/values.yaml' or 'dist/chart/manager/manager.yaml'
-is manually re-applied afterwards.
-
-## Contributing
-// TODO(user): Add detailed information on how you would like others to contribute to this project
-
-**NOTE:** Run `make help` for more information on all potential `make` targets
-
-More information can be found via the [Kubebuilder Documentation](https://book.kubebuilder.io/introduction.html)
-
-## License
-
-Copyright 2026.
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-
+```text
+cmd/main.go                         manager startup and command-line flags
+internal/controller/               reconciliation logic and envtest tests
+config/manager/                    Kubernetes Deployment
+config/rbac/                       generated RBAC manifests
+test/e2e/                          Kind-based end-to-end tests
+.github/workflows/                 CI and image publishing
+```

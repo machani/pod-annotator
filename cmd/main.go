@@ -61,6 +61,8 @@ func main() {
 	var secureMetrics bool
 	var enableHTTP2 bool
 	var tlsOpts []func(*tls.Config)
+	var targetNamespace, targetLabelKey, targetLabelValue string
+	var annotationKey, annotationValue string
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -80,6 +82,11 @@ func main() {
 	flag.StringVar(&metricsCertKey, "metrics-cert-key", "tls.key", "The name of the metrics server key file.")
 	flag.BoolVar(&enableHTTP2, "enable-http2", false,
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
+	flag.StringVar(&targetNamespace, "target-namespace", controller.DefaultTargetNamespace, "Namespace containing Pods to annotate.")
+	flag.StringVar(&targetLabelKey, "target-label-key", controller.DefaultTargetLabelKey, "Label key used to select Pods.")
+	flag.StringVar(&targetLabelValue, "target-label-value", controller.DefaultTargetLabelValue, "Required value for the target label.")
+	flag.StringVar(&annotationKey, "annotation-key", controller.DefaultAnnotationKey, "Annotation key written to matching Pods.")
+	flag.StringVar(&annotationValue, "annotation-value", controller.DefaultAnnotationValue, "Annotation value written to matching Pods.")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -181,8 +188,13 @@ func main() {
 	}
 
 	if err := (&controller.PodReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:           mgr.GetClient(),
+		Scheme:           mgr.GetScheme(),
+		TargetNamespace:  targetNamespace,
+		TargetLabelKey:   targetLabelKey,
+		TargetLabelValue: targetLabelValue,
+		AnnotationKey:    annotationKey,
+		AnnotationValue:  annotationValue,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "pod")
 		os.Exit(1)
